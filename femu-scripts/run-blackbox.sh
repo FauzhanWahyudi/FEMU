@@ -27,6 +27,10 @@ ch_xfer_lat=0
 gc_thres_pcent=75
 gc_thres_pcent_high=95
 
+# Buffer
+buffer_size=10000
+buffer_thres_pcent=90
+
 #-----------------------------------------------------------------------
 
 #Compose the entire FEMU BBSSD command line options

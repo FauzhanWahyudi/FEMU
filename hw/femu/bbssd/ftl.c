@@ -295,8 +295,8 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
     spp->enable_gc_delay = true;
 
-    spp->buffer_size = 10000;
-    spp->buffer_thres_pcent = 0.90;
+    spp->buffer_size = n->bb_params.buffer_size;
+    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;;
 
     spp->read_hit_cnt = 0;
     spp->write_hit_cnt = 0;
