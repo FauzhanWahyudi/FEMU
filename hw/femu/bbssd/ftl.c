@@ -87,6 +87,20 @@ int comp_buffer(const void *a, const void *b){
 	return ((buffer_entry*)a)->lpn - ((buffer_entry*)b)->lpn;
 }
 
+/* Next Idea
+int comp_fifo(const void *a, const void *b);
+
+int comp_fifo(const void *a, const void *b){
+	return ((fifo_entry*)a)->lpn - ((fifo_entry*)b)->lpn;
+}
+
+int comp_main(const void *a, const void *b);
+
+int comp_main(const void *a, const void *b){
+	return ((main_entry*)a)->lpn - ((main_entry*)b)->lpn;
+}
+*/
+
 static void ssd_init_lines(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -144,6 +158,26 @@ static void ssd_init_write_pointer(struct ssd *ssd)
 
     //Write Buffer: AVL Tree
     ssd->wb_tree = g_tree_new(comp_buffer);
+
+    //Ghost: AVL Tree
+    ssd->ghost_tree = g_tree_new(comp_buffer);
+
+    /*
+    //Fifo Buffer: QUEUE
+    QTAILQ_INIT(&ssd->fifo_buffer);
+    ssd->write_fifo_cnt=0;
+
+    //fifo Buffer: AVL Tree
+    ssd->wb_tree = g_tree_new(comp_fifo);
+
+        //main Buffer: QUEUE
+    QTAILQ_INIT(&ssd->main_buffer);
+    ssd->write_main_cnt=0;
+
+    //main Buffer: AVL Tree
+    ssd->wb_tree = g_tree_new(comp_main);
+    
+    */
 }
 
 static inline void check_addr(int a, int max)
@@ -296,7 +330,10 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->enable_gc_delay = true;
 
     spp->buffer_size = n->bb_params.buffer_size;
-    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;;
+    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;
+    spp->buffer_fifo = spp->buffer_size * 0.1;
+    spp->buffer_main = spp->buffer_size -  spp->buffer_s3_fifo;
+    spp->buffer_ghost = spp->buffer_size * 0.9;
 
     spp->read_hit_cnt = 0;
     spp->write_hit_cnt = 0;
@@ -793,6 +830,87 @@ bool buffer_full(struct ssd *ssd){
     return (ssd->sp.buffer_size * ssd->sp.buffer_thres_pcent <= ssd->write_buffer_cnt);
 }
 
+static void buffer_select_evict(struct ssd *ssd, struct buffer_entry *new_entry);
+
+static void buffer_select_evict(struct ssd *ssd, struct buffer_entry *new_entry){
+    if (ssd->write_main_cnt >= ssd->sp.buffer_main 
+    /* || ssd->write_fifo_cnt == 0 */) {
+    return S3FIFO_evict_main(ssd, new_entry);
+  }
+  return S3FIFO_evict_fifo(ssd, new_entry);
+}
+
+uint64_t S3FIFO_evict_fifo(struct ssd *ssd, struct buffer_entry *fifo_entry);
+
+uint64_t S3FIFO_evict_fifo(struct ssd *ssd, struct buffer_entry *fifo_entry){
+    bool has_evicted = false;
+    /* uint64_t fifo = ssd->sp.buffer_fifo;
+    uint64_t main = ssd->sp.buffer_main;
+    uint64_t ghost = ssd->sp.buffer_ghost; */
+    uint64_t ghost_lpn = 0; 
+    
+    while (!has_evicted && ssd->write_fifo_cnt > 0) {
+        struct buffer_entry *fifo_evict = NULL;
+
+        // Insert fifo_entry to eviction space, but not in S space, but b_entry
+        fifo_evict = malloc(sizeof(struct fifo_entry));
+        fifo_evict->lpn = fifo_entry->lpn;
+        if(fifo_entry->freq > 1 || buffer_insert_entry(ssd, fifo_evict)){
+                // main count represent inserting tail to 
+                spp->write_main_cnt++ 
+                if (ssd->write_main_cnt >= ssd->sp.buffer_main) {
+                        return S3FIFO_evict_main(ssd, new_entry);
+                } 
+                
+        } else {
+                    //insert lpn to ghost
+                    has_evicted = true;
+                    ghost_lpn = fifo_evict->lpn;
+                    g_tree_insert(ssd->ghost_tree, fifo_evict, fifo_evict);
+
+                    QTAILQ_REMOVE(&ssd->write_buffer, fifo_evict, b_entry); // remove from queue
+                    g_tree_remove(ssd->wb_tree, fifo_evict);  // remove from avl tree
+                    free(fifo_evict);
+
+                    return ghost_lpn;
+                }
+        
+    }
+}
+
+
+uint64_t S3FIFO_evict_main(struct ssd *ssd, struct buffer_entry *main_entry);
+
+uint64_t S3FIFO_evict_main(struct ssd *ssd, struct buffer_entry *main_entry){
+    bool has_evicted = false;
+    struct buffer_entry *main_evict = NULL;
+    main_evict = g_tree_lookup(ssd->wb_tree, main_entry);
+
+    while (!has_evicted && ssd->write_main_cnt > 0) {
+        // main count represent inserting tail to 
+        spp->write_main_cnt++ 
+
+        // Insert main_entry to updated b_entry
+        if(main_entry->freq > 0){
+            g_tree_remove(ssd->wb_tree, main_evict);
+            QTAILQ_REMOVE(&ssd->write_buffer, main_evict, b_entry);
+            free(main_evict);
+
+            g_tree_insert(ssd->wb_tree, main_entry, main_entry);
+            QTAILQ_INSERT_TAIL(&ssd->write_buffer, main_entry, b_entry);
+            main_entry->freq--;
+
+         } else {
+            has_evicted = true;
+            g_tree_remove(ssd->wb_tree, main_entry);
+            QTAILQ_REMOVE(&ssd->write_buffer, main_entry, b_entry);
+            free(main_entry);
+         }
+    }
+    
+}
+
+
 uint64_t buffer_select_victim(struct ssd *ssd);
 
 uint64_t buffer_select_victim(struct ssd *ssd){
@@ -842,6 +960,7 @@ bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
 
         g_tree_insert(ssd->wb_tree, new_entry, new_entry);
         QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
+        new_entry->freq++;
 
         return true;
     }
@@ -851,16 +970,28 @@ bool buffer_hit(struct ssd *ssd, uint64_t lpn);
 
 bool buffer_hit(struct ssd *ssd, uint64_t lpn) {
     // Buffer lookup for 'read'
-
+    // task 2_s3 fifo: change lookup to main buffer
     struct buffer_entry *buffer_entry = NULL;
+    struct buffer_entry *ghost_entry = NULL;
     struct buffer_entry target;
     target.lpn = lpn;
 
     buffer_entry = g_tree_lookup(ssd->wb_tree, &target);
     if(buffer_entry == NULL){
+        target->freq = 0;
+        while (buffer_full(ssd)) {
+        buffer_select_evict(ssd, target);}
+        ghost_entry = g_tree_lookup(ssd->ghost_tree, &target);
+        //because this just use b_entry, not S and M, count represent insert
+        if(ghost_entry == NULL){
+            ssd->write_fifo_cnt++;
+        } else {
+            ssd->write_main_cnt++}
+        
         return false;
     }
     else {
+        target->freq++;
         return true;
     }
     
@@ -884,6 +1015,8 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        //task 3_s3-fifo: maybe change buffer hit target to fifo or ghost
+        // or leave it, but change target to main, because that is the real buffer data
         if (buffer_hit(ssd, lpn)) {
             continue;
         }
@@ -942,6 +1075,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
     }
 
+    //task 1_ s3 fifo: add s3_fifo and ghost sorting logic
     if(ssd->sp.buffer_size * 0.95 <= ssd->write_buffer_cnt){
         while (buffer_full(ssd)) {
             victim_lpn = buffer_select_victim(ssd);

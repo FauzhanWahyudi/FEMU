@@ -159,6 +159,11 @@ struct ssdparams {
     int buffer_size;
     double buffer_thres_pcent;
 
+    int buffer_main;
+    int buffer_fifo;
+    int buffer_ghost;
+    bool hit_on_ghost;
+
     int read_hit_cnt;
     int read_cnt;
     int write_hit_cnt;
@@ -206,7 +211,22 @@ struct nand_cmd {
 typedef struct buffer_entry{
     uint64_t lpn;
     QTAILQ_ENTRY(buffer_entry) b_entry;
+    int freq;
 } buffer_entry;
+
+//fifo section
+typedef struct fifo_entry{
+    uint64_t lpn;
+    QTAILQ_ENTRY(fifo_entry) f_entry;
+    int freq;
+} fifo_entry;
+
+//main section
+typedef struct main_entry{
+    uint64_t lpn;
+    QTAILQ_ENTRY(main_entry) m_entry;
+    int freq;
+} main_entry;
 
 struct ssd {
     char *ssdname;
@@ -218,7 +238,17 @@ struct ssd {
     struct line_mgmt lm;
     QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;
     GTree *wb_tree;
+    GTree *ghost_tree;
+    /*  Next idea
+    QTAILQ_HEAD(fifo_buffer, fifo_entry) fifo_buffer;
+    GTree *fifo_b_tree;
+    
+    QTAILQ_HEAD(main_buffer, main_entry) main_buffer;
+    GTree *main_b_tree;*/
+
     int write_buffer_cnt;
+    int write_main_cnt; //to count main occupied byte
+    int write_fifo_cnt; //to count fifo occupied byte
 
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
