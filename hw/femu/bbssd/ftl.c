@@ -153,6 +153,26 @@ static void ssd_init_write_pointer(struct ssd *ssd)
 
     //Write Buffer: AVL Tree
     ssd->wb_tree = g_tree_new(comp_buffer);
+
+    //Ghost: AVL Tree
+    ssd->ghost_tree = g_tree_new(comp_buffer);
+
+    /*
+    //Fifo Buffer: QUEUE
+    QTAILQ_INIT(&ssd->fifo_buffer);
+    ssd->write_fifo_cnt=0;
+
+    //fifo Buffer: AVL Tree
+    ssd->wb_tree = g_tree_new(comp_fifo);
+
+        //main Buffer: QUEUE
+    QTAILQ_INIT(&ssd->main_buffer);
+    ssd->write_main_cnt=0;
+
+    //main Buffer: AVL Tree
+    ssd->wb_tree = g_tree_new(comp_main);
+    
+    */
 }
 
 static inline void check_addr(int a, int max)
@@ -305,7 +325,10 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->enable_gc_delay = true;
 
     spp->buffer_size = n->bb_params.buffer_size;
-    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;;
+    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;
+    spp->buffer_fifo = spp->buffer_size * 0.1;
+    spp->buffer_main = spp->buffer_size -  spp->buffer_s3_fifo;
+    spp->buffer_ghost = spp->buffer_size * 0.9;
 
     spp->read_hit_cnt = 0;
     spp->write_hit_cnt = 0;
@@ -1017,6 +1040,8 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        //task 3_s3-fifo: maybe change buffer hit target to fifo or ghost
+        // or leave it, but change target to main, because that is the real buffer data
         if (buffer_hit(ssd, lpn)) {
             continue;
         }
@@ -1075,6 +1100,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
     }
 
+    //task 1_ s3 fifo: add s3_fifo and ghost sorting logic
     if(ssd->sp.buffer_size * 0.95 <= ssd->write_buffer_cnt){
         while (buffer_full(ssd)) {
             victim_lpn = evict(ssd);

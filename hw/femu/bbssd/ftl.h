@@ -218,7 +218,6 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
-    QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;
     QTAILQ_HEAD(S, buffer_entry) S;
     QTAILQ_HEAD(M, buffer_entry) M;
     QTAILQ_HEAD(G, buffer_entry) G;
