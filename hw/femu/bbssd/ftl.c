@@ -87,6 +87,9 @@ int comp_buffer(const void *a, const void *b){
 	return ((buffer_entry*)a)->lpn - ((buffer_entry*)b)->lpn;
 }
 
+uint64_t evictS(struct ssd *ssd);
+uint64_t evictM(struct ssd *ssd);
+
 static void ssd_init_lines(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -140,7 +143,13 @@ static void ssd_init_write_pointer(struct ssd *ssd)
 
     //Write Buffer: QUEUE
     QTAILQ_INIT(&ssd->write_buffer);
+    QTAILQ_INIT(&ssd->S);
+    QTAILQ_INIT(&ssd->M);
+    QTAILQ_INIT(&ssd->G);
     ssd->write_buffer_cnt=0;
+    ssd->main_cnt=0;
+    ssd->fifo_cnt=0;
+    ssd->ghost_cnt=0;
 
     //Write Buffer: AVL Tree
     ssd->wb_tree = g_tree_new(comp_buffer);
@@ -788,13 +797,113 @@ static int do_gc(struct ssd *ssd, bool force)
 }
 
 bool buffer_full(struct ssd *ssd);
-
 bool buffer_full(struct ssd *ssd){
     return (ssd->sp.buffer_size * ssd->sp.buffer_thres_pcent <= ssd->write_buffer_cnt);
 }
 
-uint64_t buffer_select_victim(struct ssd *ssd);
+//Read buffer, if found, it mean cache hit
+bool buffer_hit(struct ssd *ssd, uint64_t lpn);
+bool buffer_hit(struct ssd *ssd, uint64_t lpn) {
+    // Buffer lookup for 'read'
 
+    struct buffer_entry *buffer_entry = NULL;
+    struct buffer_entry target;
+    target.lpn = lpn;
+
+    buffer_entry = g_tree_lookup(ssd->wb_tree, &target);
+    if(buffer_entry == NULL){
+        return false;
+    }
+    else {
+        return true;
+    }
+    
+}
+
+// Function to check if an item is in the ghost buffer
+bool is_in_ghost(struct ssd *ssd, uint64_t lpn);
+bool is_in_ghost(struct ssd *ssd, uint64_t lpn) {
+    buffer_entry *entry;
+    QTAILQ_FOREACH(entry, &ssd->G, b_entry) {
+        if (entry->lpn == lpn) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+// Function to evict an item from the cache
+uint64_t evict(struct ssd *ssd);
+uint64_t evict(struct ssd *ssd) {
+    if (ssd->fifo_cnt >= 0.1 * ssd->write_buffer_cnt) { // If FIFO is full
+        return evictS(ssd); // Evict from the small FIFO queue (S)
+    } else {
+        return evictM(ssd); // Evict from the medium FIFO queue (M)
+    }
+}
+
+// Function to evict from the small FIFO queue (S)
+uint64_t evictS(struct ssd *ssd) {
+    while (!QTAILQ_EMPTY(&ssd->S)) {
+        buffer_entry *t = QTAILQ_FIRST(&ssd->S);
+        if (t->freq > 1) { // If frequency is greater than 1
+            QTAILQ_REMOVE(&ssd->S, t, b_entry);
+            ssd->fifo_cnt--;
+            QTAILQ_INSERT_TAIL(&ssd->M, t, b_entry); // Move to medium FIFO queue (M)
+            ssd->main_cnt++; // Increment main count
+            if (ssd->main_cnt >= 0.9 * ssd->sp.buffer_size * ssd->sp.buffer_thres_pcent) { // If main is full
+                return evictM(ssd); // Continue evicting from medium FIFO queue (M)
+            }
+        } else {
+            QTAILQ_REMOVE(&ssd->S, t, b_entry);
+            ssd->fifo_cnt--;
+            g_tree_remove(ssd->wb_tree, t);
+            ssd->write_buffer_cnt--;
+            free(t);
+
+            QTAILQ_INSERT_TAIL(&ssd->G, t, b_entry); // Move to ghost queue (G)
+            t->in_ghost = true;
+            ssd->ghost_cnt++;
+        }
+    }
+    return 0; // No victim LPN if the loop completes
+}
+
+// Function to evict from the medium FIFO queue (M)
+uint64_t evictM(struct ssd *ssd) {
+    bool evicted = false;
+    uint64_t victim_lpn = 0;
+    while (!QTAILQ_EMPTY(&ssd->M)) {
+        buffer_entry *t = QTAILQ_FIRST(&ssd->M); 
+        if (t->freq > 0) { // If frequency is greater than 0
+            QTAILQ_REMOVE(&ssd->M, t, b_entry);
+            QTAILQ_INSERT_TAIL(&ssd->M, t, b_entry);
+            t->freq--;
+        } else {
+            // Remove from ghost if in ghost queue
+            if (t->in_ghost) {
+                QTAILQ_REMOVE(&ssd->G, t, b_entry);
+                ssd->ghost_cnt--;
+            }
+            victim_lpn = t->lpn; // Set victim LPN for return
+            QTAILQ_REMOVE(&ssd->M, t, b_entry);
+            ssd->main_cnt--; // Decrement main count
+            g_tree_remove(ssd->wb_tree, t);
+            ssd->write_buffer_cnt--;
+            free(t);
+            evicted = true;
+        }
+        if (evicted) {
+            return victim_lpn; // Return the victim LPN
+        }
+    }
+    return 0; // No victim LPN if the loop completes
+}
+
+
+/*
+uint64_t buffer_select_victim(struct ssd *ssd);
 uint64_t buffer_select_victim(struct ssd *ssd){
     // LRU
     struct buffer_entry *victim_entry = NULL;
@@ -817,9 +926,8 @@ uint64_t buffer_select_victim(struct ssd *ssd){
 
     return victim_lpn;
 }
-
+*/
 bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry);
-
 bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
 
     struct buffer_entry *old_entry = NULL;
@@ -828,42 +936,59 @@ bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
 
     if (old_entry == NULL) {
         // new write
+        //check if data ever go to ghost
+        if (is_in_ghost(ssd, new_entry->lpn)) {
+            /*
+            //in ghost, go to main,
+            if ghost is full, evict ghost
+            */
+            QTAILQ_INSERT_TAIL(&ssd->M, new_entry, b_entry);
+            ssd->main_cnt++;
+            
+            if (ssd->ghost_cnt >= ssd->main_cnt)
+            {
+                old_entry = QTAILQ_FIRST(&ssd->G);
+                QTAILQ_REMOVE(&ssd->G, old_entry, b_entry);
+                free(old_entry);
+                ssd->ghost_cnt--;
+            }
+            printf("data go to main \n");
+        } else { 
+            //not in ghost, go to fifo
+            /**/
+            QTAILQ_INSERT_TAIL(&ssd->S, new_entry, b_entry);
+            ssd->fifo_cnt++;
+            printf("data go to fifo \n ");
+        }
+        new_entry->freq = 0;
+        //QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
         g_tree_insert(ssd->wb_tree, new_entry, new_entry);
-        QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
         ssd->write_buffer_cnt++;
-
+        printf("current freq: %d \n ", new_entry->freq);
         return false;
     } 
     else {
         // update
+        /*
         g_tree_remove(ssd->wb_tree, old_entry);
         QTAILQ_REMOVE(&ssd->write_buffer, old_entry, b_entry);
         free(old_entry);
 
+        new_entry->freq = MIN(new_entry->freq + 1, 3);
         g_tree_insert(ssd->wb_tree, new_entry, new_entry);
         QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
-
+        //printf("current freq: %d \n ", new_entry->freq);
+        */
+        /*
+        s3-fifo implementation, if data found in wb_tree
+            update wb_tree, don't need to change queue
+        */
+        g_tree_remove(ssd->wb_tree, old_entry);
+        free(old_entry);
+        new_entry->freq = MIN(new_entry->freq + 1, 3);
+        g_tree_insert(ssd->wb_tree, new_entry, new_entry);
         return true;
     }
-}
-
-bool buffer_hit(struct ssd *ssd, uint64_t lpn);
-
-bool buffer_hit(struct ssd *ssd, uint64_t lpn) {
-    // Buffer lookup for 'read'
-
-    struct buffer_entry *buffer_entry = NULL;
-    struct buffer_entry target;
-    target.lpn = lpn;
-
-    buffer_entry = g_tree_lookup(ssd->wb_tree, &target);
-    if(buffer_entry == NULL){
-        return false;
-    }
-    else {
-        return true;
-    }
-    
 }
 
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
@@ -944,7 +1069,9 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     if(ssd->sp.buffer_size * 0.95 <= ssd->write_buffer_cnt){
         while (buffer_full(ssd)) {
-            victim_lpn = buffer_select_victim(ssd);
+            victim_lpn = evict(ssd);
+            if(victim_lpn != 0){
+            //victim_lpn = buffer_select_victim(ssd);
             ppa = get_maptbl_ent(ssd, victim_lpn);
             if (mapped_ppa(&ppa)) {
                 /* update old page information first */
@@ -973,6 +1100,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
             new_lun = get_lun(ssd, &ppa);
             new_lun->evict_endtime = new_lun->next_lun_avail_time;
+            }
         }
     }
 
@@ -982,7 +1110,6 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         buffer_entry = malloc(sizeof(struct buffer_entry));
         buffer_entry->lpn = lpn;
         hitcheck = hitcheck && buffer_insert_entry(ssd, buffer_entry);
-
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 

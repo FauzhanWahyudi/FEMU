@@ -205,6 +205,8 @@ struct nand_cmd {
 
 typedef struct buffer_entry{
     uint64_t lpn;
+    int freq; // Frequency counter with two bits
+    bool in_ghost; // Flag indicating if the item is in the ghost queue
     QTAILQ_ENTRY(buffer_entry) b_entry;
 } buffer_entry;
 
@@ -217,8 +219,14 @@ struct ssd {
     struct write_pointer wp;
     struct line_mgmt lm;
     QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;
+    QTAILQ_HEAD(S, buffer_entry) S;
+    QTAILQ_HEAD(M, buffer_entry) M;
+    QTAILQ_HEAD(G, buffer_entry) G;
     GTree *wb_tree;
     int write_buffer_cnt;
+    int main_cnt; //determined main size
+    int fifo_cnt; //determined fifo size
+    int ghost_cnt; //determined ghost size
 
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
