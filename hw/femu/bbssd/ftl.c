@@ -845,6 +845,7 @@ uint64_t evict(struct ssd *ssd) {
 
 // Function to evict from the small FIFO queue (S)
 uint64_t evictS(struct ssd *ssd) {
+    bool evicted = false;
     while (!QTAILQ_EMPTY(&ssd->S)) {
         buffer_entry *t = QTAILQ_FIRST(&ssd->S);
         if (t->freq > 1) { // If frequency is greater than 1
@@ -856,16 +857,22 @@ uint64_t evictS(struct ssd *ssd) {
                 return evictM(ssd); // Continue evicting from medium FIFO queue (M)
             }
         } else {
+            QTAILQ_INSERT_TAIL(&ssd->G, t, b_entry); // Move to ghost queue (G)
+            t->in_ghost = true;
+            ssd->ghost_cnt++;
+            evicted = true;
+        }
+
+        if (evicted)
+        {
             QTAILQ_REMOVE(&ssd->S, t, b_entry);
             ssd->fifo_cnt--;
             g_tree_remove(ssd->wb_tree, t);
             ssd->write_buffer_cnt--;
             free(t);
-
-            QTAILQ_INSERT_TAIL(&ssd->G, t, b_entry); // Move to ghost queue (G)
-            t->in_ghost = true;
-            ssd->ghost_cnt++;
+            break;
         }
+        
     }
     return 0; // No victim LPN if the loop completes
 }
@@ -895,10 +902,11 @@ uint64_t evictM(struct ssd *ssd) {
             evicted = true;
         }
         if (evicted) {
-            return victim_lpn; // Return the victim LPN
+            break;
         }
     }
-    return 0; // No victim LPN if the loop completes
+    return victim_lpn; // Return the victim LPN
+        // or 0 = No victim LPN if the loop completes
 }
 
 
@@ -949,7 +957,7 @@ bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
             {
                 old_entry = QTAILQ_FIRST(&ssd->G);
                 QTAILQ_REMOVE(&ssd->G, old_entry, b_entry);
-                free(old_entry);
+                //free(old_entry);
                 ssd->ghost_cnt--;
             }
             printf("data go to main \n");
