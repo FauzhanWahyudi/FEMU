@@ -160,8 +160,10 @@ struct ssdparams {
     double buffer_thres_pcent;
 
     int read_hit_cnt;
+    int read_miss_cnt;
     int read_cnt;
     int write_hit_cnt;
+    int write_miss_cnt;
     int write_cnt;
 };
 

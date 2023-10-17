@@ -307,7 +307,9 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;
 
     spp->read_hit_cnt = 0;
+    spp->read_miss_cnt = 0;
     spp->write_hit_cnt = 0;
+    spp->write_miss_cnt = 0;
     spp->read_cnt = 0;
     spp->write_cnt = 0;
 
@@ -850,14 +852,15 @@ uint64_t evictS(struct ssd *ssd) {
         if (t->freq > 1) { // If frequency is greater than 1
             QTAILQ_REMOVE(&ssd->S, t, b_entry);
             ssd->fifo_cnt--;
+            t->in_ghost = false;
             QTAILQ_INSERT_TAIL(&ssd->M, t, b_entry); // Move to medium FIFO queue (M)
             ssd->main_cnt++; // Increment main count
             if (ssd->main_cnt >= 0.9 * ssd->sp.buffer_size * ssd->sp.buffer_thres_pcent) { // If main is full
                 return evictM(ssd); // Continue evicting from medium FIFO queue (M)
             }
         } else {
-            QTAILQ_INSERT_TAIL(&ssd->G, t, b_entry); // Move to ghost queue (G)
             t->in_ghost = true;
+            QTAILQ_INSERT_TAIL(&ssd->G, t, b_entry); // Move to ghost queue (G)
             ssd->ghost_cnt++;
             evicted = true;
         }
@@ -868,7 +871,7 @@ uint64_t evictS(struct ssd *ssd) {
             ssd->fifo_cnt--;
             g_tree_remove(ssd->wb_tree, t);
             ssd->write_buffer_cnt--;
-            free(t);
+            //free(t);
             break;
         }
         
@@ -952,11 +955,11 @@ bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
             QTAILQ_INSERT_TAIL(&ssd->M, new_entry, b_entry);
             ssd->main_cnt++;
             
-            if (ssd->ghost_cnt >= ssd->main_cnt)
+            if (ssd->ghost_cnt >= 0.1 * ssd->write_buffer_cnt)
             {
                 old_entry = QTAILQ_FIRST(&ssd->G);
                 QTAILQ_REMOVE(&ssd->G, old_entry, b_entry);
-                //free(old_entry);
+                free(old_entry);
                 ssd->ghost_cnt--;
             }
             printf("data go to main \n");
@@ -977,16 +980,6 @@ bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
     else {
         // update
         /*
-        g_tree_remove(ssd->wb_tree, old_entry);
-        QTAILQ_REMOVE(&ssd->write_buffer, old_entry, b_entry);
-        free(old_entry);
-
-        new_entry->freq = MIN(new_entry->freq + 1, 3);
-        g_tree_insert(ssd->wb_tree, new_entry, new_entry);
-        QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
-        //printf("current freq: %d \n ", new_entry->freq);
-        */
-        /*
         s3-fifo implementation, if data found in wb_tree
             update wb_tree, don't need to change queue
         */
@@ -994,6 +987,7 @@ bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
         free(old_entry);
         new_entry->freq = MIN(new_entry->freq + 1, 3);
         g_tree_insert(ssd->wb_tree, new_entry, new_entry);
+        printf("current freq: %d \n ", new_entry->freq);
         return true;
     }
 }
@@ -1023,6 +1017,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         }
         else {
             hitcheck = false;
+            ssd->sp.read_miss_cnt++;
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
                 //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
@@ -1039,11 +1034,11 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             maxlat = (sublat > maxlat) ? sublat : maxlat;
         }
     }
-
-    if (hitcheck == true){
+    ssd->sp.read_cnt++;
+    if (hitcheck){
         ssd->sp.read_hit_cnt++;
+        printf("Read count %d --> hit: %d \n", ssd->sp.read_cnt, ssd->sp.read_hit_cnt);
     }
-
     return maxlat;
 }
 
@@ -1125,6 +1120,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     if (hitcheck) {
         ssd->sp.write_hit_cnt++;
+        printf("Write count %d --> hit: %d \n", ssd->sp.write_cnt, ssd->sp.write_hit_cnt);
     }
 
     return maxlat;
